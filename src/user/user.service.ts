@@ -35,7 +35,7 @@ export class UserService {
   }
 
   getMe(id: string) {
-    return this.userRepository.findOne(id);
+    return this.userRepository.findOneBy({ id });
   }
 
   update(id: string, updateUserDto: UpdateUserDto) {
