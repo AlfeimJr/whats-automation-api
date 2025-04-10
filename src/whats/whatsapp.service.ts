@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { create, Whatsapp } from 'venom-bot';
+import { Client, LocalAuth } from 'whatsapp-web.js';
+import * as QRCode from 'qrcode';
 import * as fs from 'fs';
 import * as path from 'path';
 
 interface WhatsAppClientData {
-  client: Whatsapp;
+  client: Client;
   clientReadyPromise: Promise<void>;
   qrCode: string | null;
 }
@@ -17,6 +18,10 @@ export class WhatsappSessionManagerService {
     new Map();
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
+  /**
+   * Retorna (ou cria, se não existir) uma instância do WhatsApp para o usuário.
+   * Cada usuário terá uma instância única identificada pelo seu userId.
+   */
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     if (this.sessions.has(userId)) {
       return this.sessions.get(userId);
@@ -26,67 +31,70 @@ export class WhatsappSessionManagerService {
     return clientData;
   }
 
+  /**
+   * Cria uma nova instância do WhatsApp client para um usuário específico.
+   * Utilizamos o userId para definir o clientId e o dataPath (diretório de sessão), garantindo uma sessão exclusiva.
+   */
   async createClient(userId: string): Promise<WhatsAppClientData> {
-    // Define o diretório da sessão (ex.: venom-sessions/{userId})
-    const sessionPath = path.join(process.cwd(), 'venom-sessions', userId);
-    if (!fs.existsSync(sessionPath)) {
-      fs.mkdirSync(sessionPath, { recursive: true });
-    }
+    // Define o caminho para salvar os dados da sessão para esse usuário
+    const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
-    // Preparar uma promise para aguardar a criação do cliente
-    let resolveReady: () => void;
-    let rejectReady: (error?: any) => void;
-    const readyPromise = new Promise<void>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
+    // Cria o client com LocalAuth utilizando um clientId único (o próprio userId)
+    const client = new Client({
+      authStrategy: new LocalAuth({
+        clientId: userId,
+        dataPath: dataPath,
+      }),
     });
 
     const clientData: WhatsAppClientData = {
-      client: null,
-      clientReadyPromise: readyPromise,
+      client: client,
       qrCode: null,
+      clientReadyPromise: new Promise<void>((resolve, reject) => {
+        client.on('qr', async (qr) => {
+          this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
+          try {
+            const dataUrl = await QRCode.toDataURL(qr);
+            clientData.qrCode = dataUrl;
+            // Salva a imagem em disco
+            const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+            fs.mkdirSync(dataPath, { recursive: true });
+            const filePath = path.join(dataPath, 'qr.png');
+            fs.writeFileSync(filePath, base64Data, 'base64');
+            this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
+          } catch (error) {
+            if (error.message.includes('Target closed')) {
+              this.logger.error(
+                `A página foi fechada antes que o QR pudesse ser gerado para ${userId}`,
+              );
+            } else {
+              this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
+            }
+          }
+        });
+
+        client.on('ready', () => {
+          this.logger.log(
+            `WhatsApp Client está pronto para o usuário ${userId}`,
+          );
+          clientData.qrCode = null; // Limpa o QR code, indicando que a sessão foi autenticada
+          resolve();
+        });
+
+        client.on('auth_failure', (msg) => {
+          this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
+          reject(msg);
+        });
+      }),
     };
 
-    // Chamada à função create do Venom Bot com os parâmetros corretos:
-    // 1º parâmetro: nome da sessão
-    // 2º parâmetro: callback para capturar o QR
-    // 3º parâmetro: callback para status da sessão
-    // 4º parâmetro: objeto de configuração com as opções corretas
-    create(
-      userId, // Nome da sessão
-      (qr: string, asciiQR: string, attempts: number) => {
-        this.logger.log(`QR Code recebido para o usuário ${userId}`);
-        // Armazena o código QR
-        clientData.qrCode = qr;
-
-        // (Opcional) Salva uma versão ASCII do QR para debug
-        const filePath = path.join(sessionPath, 'qr.txt');
-        fs.writeFileSync(filePath, asciiQR);
-        this.logger.log(`QR Code (ASCII) salvo para ${userId} em ${filePath}`);
-      },
-      (statusSession: string, session: string) => {
-        this.logger.log(`Status da sessão "${userId}": ${statusSession}`);
-      },
-      {
-        headless: 'new', // Permite: false, "new" ou "old"
-        logQR: true, // Deve ser booleano
-      },
-    )
-      .then((client: Whatsapp) => {
-        this.logger.log(`Venom Client está pronto para o usuário ${userId}`);
-        clientData.client = client;
-        // Limpa o QR quando a sessão estiver ativa
-        clientData.qrCode = null;
-        resolveReady();
-      })
-      .catch((error) => {
-        this.logger.error(`Erro ao criar Venom client para ${userId}:`, error);
-        rejectReady(error);
-      });
-
+    client.initialize();
     return clientData;
   }
 
+  /**
+   * Retorna somente os chats de grupo para um usuário.
+   */
   async getChats(userId: string): Promise<{ id: string; name: string }[]> {
     // Verifica cache
     const cache = this.chatCache.get(userId);
@@ -98,16 +106,17 @@ export class WhatsappSessionManagerService {
 
     const clientData = await this.getClientForUser(userId);
     await clientData.clientReadyPromise;
-    // Obtém todos os chats via getAllChats do Venom Bot
-    const chats = await clientData.client.getAllChats();
-    // Filtra chats de grupo
+    const chats = await clientData.client.getChats();
+    // Filtra apenas os chats que são grupos
     const groupChats = chats.filter((chat) => chat.isGroup);
+    console.log(groupChats);
 
-    const result = groupChats.map((chat: any) => ({
-      id: chat.id,
-      name: chat.contact?.name || chat.name || chat.id,
+    const result = groupChats.map((chat) => ({
+      id: chat.id._serialized,
+      name: chat.name || chat.id.user,
     }));
 
+    // Atualiza o cache antes de retornar o resultado
     this.chatCache.set(userId, {
       data: result,
       timestamp: now,
@@ -119,12 +128,18 @@ export class WhatsappSessionManagerService {
     return result;
   }
 
+  /**
+   * Envia uma mensagem comum para um chat específico para o usuário.
+   */
   async sendMessage(userId: string, chatId: string, message: string) {
     const clientData = await this.getClientForUser(userId);
     await clientData.clientReadyPromise;
-    return clientData.client.sendText(chatId, message);
+    return clientData.client.sendMessage(chatId, message);
   }
 
+  /**
+   * Envia uma mensagem mencionando todos os participantes de um grupo para o usuário.
+   */
   async mentionEveryone(userId: string, chatId: string, message: string) {
     const clientData = await this.getClientForUser(userId);
     await clientData.clientReadyPromise;
@@ -135,6 +150,9 @@ export class WhatsappSessionManagerService {
     return (clientData.client as any).sendTextWithMentions(chatId, message);
   }
 
+  /**
+   * Retorna o QR code atual para um usuário, se houver. Caso contrário, indica que o client está pronto.
+   */
   async getQRCode(userId: string): Promise<{ qr?: string; ready?: boolean }> {
     const clientData = await this.getClientForUser(userId);
     if (clientData.qrCode) {
@@ -144,26 +162,54 @@ export class WhatsappSessionManagerService {
   }
 
   async logout(userId: string): Promise<void> {
+    // Verifica se existe uma sessão para este usuário
     if (!this.sessions.has(userId)) {
       this.logger.warn(
         `Tentativa de logout para usuário inexistente: ${userId}`,
       );
       return;
     }
+
     const clientData = this.sessions.get(userId);
+    const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
+
     try {
-      if (clientData.client) {
-        await clientData.client.close();
+      // Verifica se o cliente está em um estado válido antes de tentar logout
+      if (clientData.client && clientData.client.info) {
+        // Tenta fazer logout com timeout para evitar bloqueio
+        await Promise.race([
+          clientData.client.logout(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Timeout no logout')), 10000),
+          ),
+        ]);
       }
     } catch (error) {
       this.logger.warn(`Erro no processo de logout para ${userId}:`, error);
     } finally {
-      this.sessions.delete(userId);
-      const sessionPath = path.join(process.cwd(), 'venom-sessions', userId);
       try {
-        if (fs.existsSync(sessionPath)) {
-          fs.rmSync(sessionPath, { recursive: true, force: true });
-          this.logger.log(`Diretório de sessão removido para ${userId}`);
+        // Sempre tenta destruir o cliente, independente do resultado do logout
+        if (clientData.client) {
+          await clientData.client.destroy();
+        }
+        this.logger.log(`Cliente destruído para o usuário ${userId}`);
+      } catch (destroyError) {
+        this.logger.warn(
+          `Erro ao destruir cliente para ${userId}:`,
+          destroyError,
+        );
+      }
+
+      // Remove a sessão do mapa antes de tentar excluir os arquivos
+      this.sessions.delete(userId);
+
+      // Tenta remover os arquivos da sessão
+      try {
+        if (fs.existsSync(dataPath)) {
+          fs.rmSync(dataPath, { recursive: true, force: true });
+          this.logger.log(
+            `Diretório de sessão removido para o usuário ${userId}`,
+          );
         }
       } catch (fsError) {
         this.logger.warn(
