@@ -51,10 +51,9 @@ export class WhatsappSessionManagerService {
       clientReadyPromise: null,
       qrCode: null,
     };
-
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
       // Use .once() para que o evento QR seja tratado apenas uma vez
-      client.once('qr', async (qr) => {
+      client.on('qr', async (qr) => {
         this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
         try {
           const dataUrl = await QRCode.toDataURL(qr);
