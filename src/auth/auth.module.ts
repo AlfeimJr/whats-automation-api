@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 
-
 import { PassportModule } from '@nestjs/passport/dist';
 import { UserModule } from 'src/user/user.module';
 import { AuthService } from './auth.service';
@@ -12,7 +11,7 @@ import { LoginModule } from 'src/login/login.module';
 
 @Module({
   imports: [
-    LoginModule, 
+    LoginModule,
     UserModule,
     PassportModule,
     JwtModule.register({
@@ -20,15 +19,7 @@ import { LoginModule } from 'src/login/login.module';
       signOptions: { expiresIn: '28800s' },
     }),
   ],
-  providers: [
-    AuthService, 
-    LocalStrategy,
-    JwtStrategy
-  ],
-  exports: [
-    JwtModule, 
-    AuthService, 
-    
-  ]
+  providers: [AuthService, LocalStrategy, JwtStrategy],
+  exports: [JwtModule, AuthService],
 })
-export class AuthModule{}
+export class AuthModule {}

@@ -1,3 +1,3 @@
 export const jwtConstants = {
-    secret: 'minha-api-segura',
-  };
+  secret: 'minha-api-segura',
+};

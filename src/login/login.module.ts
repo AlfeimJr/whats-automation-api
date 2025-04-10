@@ -6,10 +6,7 @@ import { LoginController } from './login.controller';
 import { LoginService } from './login.service';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([User]),
-    forwardRef(() => AuthModule),
-  ],
+  imports: [TypeOrmModule.forFeature([User]), forwardRef(() => AuthModule)],
   controllers: [LoginController],
   exports: [LoginService],
   providers: [LoginService],
