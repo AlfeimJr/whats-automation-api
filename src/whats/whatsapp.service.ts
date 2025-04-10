@@ -51,30 +51,32 @@ export class WhatsappSessionManagerService {
       clientReadyPromise: null,
       qrCode: null,
     };
-    clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      // Use .once() para que o evento QR seja tratado apenas uma vez
-      client.on('qr', async (qr) => {
-        this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
-        try {
-          const dataUrl = await QRCode.toDataURL(qr);
-          clientData.qrCode = dataUrl;
-          // Salva a imagem em disco (opcional)
-          const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-          fs.mkdirSync(dataPath, { recursive: true });
-          const filePath = path.join(dataPath, 'qr.png');
-          fs.writeFileSync(filePath, base64Data, 'base64');
-          this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
-        } catch (error) {
-          // Se ocorrer erro do tipo "Target closed", loga de forma específica
-          if (error.message.includes('Target closed')) {
-            this.logger.error(
-              `A página foi fechada antes que o QR pudesse ser gerado para ${userId}`,
-            );
-          } else {
-            this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
-          }
+
+    let qrGenerated = false;
+    client.on('qr', async (qr) => {
+      // Se já gerou um QR code válido, ignore as novas emissões
+      if (qrGenerated) {
+        return;
+      }
+      this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
+      try {
+        const dataUrl = await QRCode.toDataURL(qr);
+        clientData.qrCode = dataUrl;
+        qrGenerated = true;
+        // Salva a imagem em disco (opcional)
+        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+        fs.mkdirSync(dataPath, { recursive: true });
+        const filePath = path.join(dataPath, 'qr.png');
+        fs.writeFileSync(filePath, base64Data, 'base64');
+        this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
+      } catch (error) {
+        if (error.message.includes('Target closed')) {
+          this.logger.error(`A página foi fechada antes que o QR pudesse ser gerado para ${userId}`);
+        } else {
+          this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
         }
-      });
+      }
+    });
 
       client.on('ready', () => {
         this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
