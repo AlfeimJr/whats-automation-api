@@ -53,19 +53,20 @@ export class WhatsappSessionManagerService {
     };
 
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      client.on('qr', async (qr) => {
+      // Use .once() para que o evento QR seja tratado apenas uma vez
+      client.once('qr', async (qr) => {
         this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
         try {
           const dataUrl = await QRCode.toDataURL(qr);
           clientData.qrCode = dataUrl;
-          // Salva a imagem em disco
+          // Salva a imagem em disco (opcional)
           const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
           fs.mkdirSync(dataPath, { recursive: true });
           const filePath = path.join(dataPath, 'qr.png');
           fs.writeFileSync(filePath, base64Data, 'base64');
           this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
         } catch (error) {
-          // Verifica se o erro é do tipo "Target closed"
+          // Se ocorrer erro do tipo "Target closed", loga de forma específica
           if (error.message.includes('Target closed')) {
             this.logger.error(
               `A página foi fechada antes que o QR pudesse ser gerado para ${userId}`,
