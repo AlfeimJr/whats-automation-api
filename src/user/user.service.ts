@@ -22,14 +22,11 @@ export class UserService {
       saltOrRounds,
     );
 
-    // Gera um UUID para o usuário
     const id = uuidv4();
 
-    // Atribui o id e a senha hasheada ao DTO
     createUserDto.id = id;
     createUserDto.password = hashedPassword;
 
-    // Salva o usuário no banco
     return this.userRepository.save(createUserDto);
   }
 
