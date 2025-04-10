@@ -1,6 +1,6 @@
 // src/whatsapp/whatsapp-session-manager.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { Client, LocalAuth, GroupChat } from 'whatsapp-web.js';
+import { Client, LocalAuth, Chat, GroupChat } from 'whatsapp-web.js';
 import * as QRCode from 'qrcode';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -52,35 +52,41 @@ export class WhatsappSessionManagerService {
       qrCode: null,
     };
 
+    // Flag para garantir que o QR code seja definido apenas uma vez
     let qrGenerated = false;
-    client.on('qr', async (qr) => {
-      // Se já gerou um QR code válido, ignore as novas emissões
-      if (qrGenerated) {
-        return;
-      }
-      this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
-      try {
-        const dataUrl = await QRCode.toDataURL(qr);
-        clientData.qrCode = dataUrl;
-        qrGenerated = true;
-        // Salva a imagem em disco (opcional)
-        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-        fs.mkdirSync(dataPath, { recursive: true });
-        const filePath = path.join(dataPath, 'qr.png');
-        fs.writeFileSync(filePath, base64Data, 'base64');
-        this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
-      } catch (error) {
-        if (error.message.includes('Target closed')) {
-          this.logger.error(`A página foi fechada antes que o QR pudesse ser gerado para ${userId}`);
-        } else {
-          this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
-        }
-      }
-    });
 
+    clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
+      // Evento de QR code: atualiza somente se ainda não foi gerado.
+      client.on('qr', async (qr) => {
+        if (qrGenerated) {
+          return;
+        }
+        this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
+        try {
+          const dataUrl = await QRCode.toDataURL(qr);
+          clientData.qrCode = dataUrl;
+          qrGenerated = true;
+          // Opcional: salva o QR code em disco
+          const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+          fs.mkdirSync(dataPath, { recursive: true });
+          const filePath = path.join(dataPath, 'qr.png');
+          fs.writeFileSync(filePath, base64Data, 'base64');
+          this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
+        } catch (error) {
+          if (error.message.includes('Target closed')) {
+            this.logger.error(
+              `A página foi fechada antes que o QR pudesse ser gerado para ${userId}`,
+            );
+          } else {
+            this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
+          }
+        }
+      });
+
+      // Quando o cliente estiver pronto, limpa o QR code e resolve a promise
       client.on('ready', () => {
         this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
-        clientData.qrCode = null; // Limpa o QR code, indicando que a sessão foi autenticada
+        clientData.qrCode = null; // Sessão autenticada, nenhum QR code é necessário
         resolve();
       });
 
@@ -103,8 +109,9 @@ export class WhatsappSessionManagerService {
     const chats = await clientData.client.getChats();
     // Filtra apenas os chats que são grupos
     const groupChats = chats.filter((chat) => chat.isGroup);
-    console.log(groupChats);
-
+    this.logger.log(
+      `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
+    );
     return groupChats.map((chat) => ({
       id: chat.id._serialized,
       name: chat.name || chat.id.user,
@@ -149,6 +156,9 @@ export class WhatsappSessionManagerService {
     return { ready: true };
   }
 
+  /**
+   * Realiza o logout do usuário, destruindo a instância do client e removendo os dados da sessão.
+   */
   async logout(userId: string): Promise<void> {
     // Verifica se existe uma sessão para este usuário
     if (!this.sessions.has(userId)) {
@@ -157,14 +167,11 @@ export class WhatsappSessionManagerService {
       );
       return;
     }
-
     const clientData = this.sessions.get(userId);
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
-
     try {
-      // Verifica se o cliente está em um estado válido antes de tentar logout
+      // Se o client estiver em um estado válido, tenta o logout com timeout
       if (clientData.client && clientData.client.info) {
-        // Tenta fazer logout com timeout para evitar bloqueio
         await Promise.race([
           clientData.client.logout(),
           new Promise((_, reject) =>
@@ -176,7 +183,7 @@ export class WhatsappSessionManagerService {
       this.logger.warn(`Erro no processo de logout para ${userId}:`, error);
     } finally {
       try {
-        // Sempre tenta destruir o cliente, independente do resultado do logout
+        // Destrói a instância do client
         if (clientData.client) {
           await clientData.client.destroy();
         }
@@ -187,11 +194,9 @@ export class WhatsappSessionManagerService {
           destroyError,
         );
       }
-
-      // Remove a sessão do mapa antes de tentar excluir os arquivos
+      // Remove a instância do mapa para forçar a criação de uma nova sessão no próximo acesso
       this.sessions.delete(userId);
-
-      // Tenta remover os arquivos da sessão
+      // Remove os arquivos de sessão
       try {
         if (fs.existsSync(dataPath)) {
           fs.rmSync(dataPath, { recursive: true, force: true });
