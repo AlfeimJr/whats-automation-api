@@ -52,20 +52,14 @@ export class WhatsappSessionManagerService {
       qrCode: null,
     };
 
-    // Flag para garantir que o QR code seja definido apenas uma vez
-    let qrGenerated = false;
-
+    // Criamos a promise que será resolvida quando o client estiver pronto
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      // Evento de QR code: atualiza somente se ainda não foi gerado.
-      client.on('qr', async (qr) => {
-        if (qrGenerated) {
-          return;
-        }
+      // Usamos "once" para que o evento "qr" seja tratado apenas uma vez
+      client.once('qr', async (qr) => {
         this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
         try {
           const dataUrl = await QRCode.toDataURL(qr);
           clientData.qrCode = dataUrl;
-          qrGenerated = true;
           // Opcional: salva o QR code em disco
           const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
           fs.mkdirSync(dataPath, { recursive: true });
@@ -83,19 +77,21 @@ export class WhatsappSessionManagerService {
         }
       });
 
-      // Quando o cliente estiver pronto, limpa o QR code e resolve a promise
-      client.on('ready', () => {
+      // Evento "ready" indica que o client está autenticado e pronto
+      client.once('ready', () => {
         this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
-        clientData.qrCode = null; // Sessão autenticada, nenhum QR code é necessário
+        clientData.qrCode = null; // Limpa o QR Code após a autenticação
         resolve();
       });
 
-      client.on('auth_failure', (msg) => {
+      // Trata o erro de autenticação
+      client.once('auth_failure', (msg) => {
         this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
         reject(msg);
       });
     });
 
+    // Inicializa o client, disparando os eventos necessários
     client.initialize();
     return clientData;
   }
@@ -160,7 +156,6 @@ export class WhatsappSessionManagerService {
    * Realiza o logout do usuário, destruindo a instância do client e removendo os dados da sessão.
    */
   async logout(userId: string): Promise<void> {
-    // Verifica se existe uma sessão para este usuário
     if (!this.sessions.has(userId)) {
       this.logger.warn(
         `Tentativa de logout para usuário inexistente: ${userId}`,
@@ -170,7 +165,6 @@ export class WhatsappSessionManagerService {
     const clientData = this.sessions.get(userId);
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
     try {
-      // Se o client estiver em um estado válido, tenta o logout com timeout
       if (clientData.client && clientData.client.info) {
         await Promise.race([
           clientData.client.logout(),
@@ -183,7 +177,6 @@ export class WhatsappSessionManagerService {
       this.logger.warn(`Erro no processo de logout para ${userId}:`, error);
     } finally {
       try {
-        // Destrói a instância do client
         if (clientData.client) {
           await clientData.client.destroy();
         }
@@ -194,9 +187,7 @@ export class WhatsappSessionManagerService {
           destroyError,
         );
       }
-      // Remove a instância do mapa para forçar a criação de uma nova sessão no próximo acesso
       this.sessions.delete(userId);
-      // Remove os arquivos de sessão
       try {
         if (fs.existsSync(dataPath)) {
           fs.rmSync(dataPath, { recursive: true, force: true });
