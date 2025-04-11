@@ -34,12 +34,15 @@ export class WhatsappSessionManagerService {
   /**
    * Cria uma nova instância do WhatsApp client para um usuário específico.
    * Utilizamos o userId para definir o clientId e o dataPath (diretório de sessão), garantindo uma sessão exclusiva.
+   *
+   * Nesta implementação, ao gerar o primeiro QR code, o mesmo é exibido e um timer de 2 minutos é iniciado.
+   * Se o client não autenticar durante esse período, o client é destruído e a sessão é reiniciada.
    */
   async createClient(userId: string): Promise<WhatsAppClientData> {
-    // Define o caminho para salvar os dados da sessão para esse usuário
+    // Define o caminho para salvar os dados da sessão para esse usuário.
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
-    // Cria o client com LocalAuth utilizando um clientId único (o próprio userId)
+    // Cria o client com LocalAuth utilizando um clientId único (o próprio userId).
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: userId,
@@ -47,7 +50,8 @@ export class WhatsappSessionManagerService {
       }),
     });
 
-    // Variável para armazenar o timer do QR code
+    // Controle para exibir apenas o primeiro QR recebido.
+    let firstQrShown = false;
     let qrTimer: NodeJS.Timeout;
 
     const clientData: WhatsAppClientData = {
@@ -55,6 +59,14 @@ export class WhatsappSessionManagerService {
       qrCode: null,
       clientReadyPromise: new Promise<void>((resolve, reject) => {
         client.on('qr', async (qr) => {
+          // Exibe apenas o primeiro QR code recebido.
+          if (firstQrShown) {
+            this.logger.log(
+              `QR code repetido recebido para ${userId} ignorado.`,
+            );
+            return;
+          }
+          firstQrShown = true;
           this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
           try {
             const dataUrl = await QRCode.toDataURL(qr);
@@ -66,27 +78,24 @@ export class WhatsappSessionManagerService {
             fs.writeFileSync(filePath, base64Data, 'base64');
             this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
 
-            // Ao gerar o primeiro QR, inicia o timer de 2 minutos
-            if (!qrTimer) {
-              qrTimer = setTimeout(async () => {
-                this.logger.warn(
-                  `QR code para ${userId} expirou após 2 minutos. Reinicializando...`,
+            // Inicia o timer de 2 minutos.
+            qrTimer = setTimeout(async () => {
+              this.logger.warn(
+                `QR code para ${userId} expirou após 2 minutos. Reinicializando a sessão...`,
+              );
+              try {
+                await client.destroy();
+              } catch (destroyError) {
+                this.logger.error(
+                  `Erro ao destruir o client para ${userId}:`,
+                  destroyError,
                 );
-                try {
-                  // Tenta destruir o client atual
-                  await client.destroy();
-                } catch (destroyError) {
-                  this.logger.error(
-                    `Erro ao destruir o cliente para ${userId}:`,
-                    destroyError,
-                  );
-                }
-                // Remove a sessão atual para permitir uma reinicialização
-                this.sessions.delete(userId);
-                // Opcionalmente, você pode disparar aqui uma nova tentativa de criação:
-                // this.createClient(userId);
-              }, 2 * 60 * 1000); // 2 minutos
-            }
+              }
+              // Remove a sessão para permitir uma nova tentativa.
+              this.sessions.delete(userId);
+              // Opcionalmente, se desejar reiniciar automaticamente, pode chamar this.createClient(userId)
+              // ou notificar o usuário para tentar novamente.
+            }, 2 * 60 * 1000); // 2 minutos
           } catch (error) {
             if (error.message.includes('Target closed')) {
               this.logger.error(
@@ -99,12 +108,12 @@ export class WhatsappSessionManagerService {
         });
 
         client.on('ready', () => {
-          // Se a autenticação ocorrer, cancela o timer
+          // Se o client se autentica, cancela o timer do QR code.
           if (qrTimer) clearTimeout(qrTimer);
           this.logger.log(
             `WhatsApp Client está pronto para o usuário ${userId}`,
           );
-          clientData.qrCode = null; // Limpa o QR code, indicando que a sessão foi autenticada
+          clientData.qrCode = null; // Limpa o QR code, indicando que a sessão foi autenticada.
           resolve();
         });
 
@@ -137,7 +146,9 @@ export class WhatsappSessionManagerService {
     const chats = await clientData.client.getChats();
     // Filtra apenas os chats que são grupos
     const groupChats = chats.filter((chat) => chat.isGroup);
-    console.log(groupChats);
+    this.logger.log(
+      `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
+    );
 
     const result = groupChats.map((chat) => ({
       id: chat.id._serialized,
@@ -150,9 +161,6 @@ export class WhatsappSessionManagerService {
       timestamp: now,
     });
 
-    this.logger.log(
-      `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
-    );
     return result;
   }
 
@@ -167,6 +175,7 @@ export class WhatsappSessionManagerService {
 
   /**
    * Envia uma mensagem mencionando todos os participantes de um grupo para o usuário.
+   * Aqui, utilizamos o método sendMessage com a opção "mentions".
    */
   async mentionEveryone(userId: string, chatId: string, message: string) {
     const clientData = await this.getClientForUser(userId);
@@ -174,8 +183,13 @@ export class WhatsappSessionManagerService {
     const chat = await clientData.client.getChatById(chatId);
     if (!chat) throw new Error('Chat não encontrado');
     if (!chat.isGroup) throw new Error('O chat não é um grupo');
-    // Como o método sendTextWithMentions não consta na definição de tipos, forçamos como any:
-    return (clientData.client as any).sendTextWithMentions(chatId, message);
+
+    // Cast para GroupChat para acessar a lista de participantes
+    const groupChat = chat as any;
+    const mentions = groupChat.participants.map(
+      (participant: any) => participant.id._serialized,
+    );
+    return clientData.client.sendMessage(chatId, message, { mentions });
   }
 
   /**
@@ -189,8 +203,11 @@ export class WhatsappSessionManagerService {
     return { ready: true };
   }
 
+  /**
+   * Realiza o logout do usuário, encerrando a sessão, destruindo o client e removendo os arquivos da sessão.
+   */
   async logout(userId: string): Promise<void> {
-    // Verifica se existe uma sessão para este usuário
+    // Verifica se existe uma sessão para este usuário.
     if (!this.sessions.has(userId)) {
       this.logger.warn(
         `Tentativa de logout para usuário inexistente: ${userId}`,
@@ -202,9 +219,9 @@ export class WhatsappSessionManagerService {
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
     try {
-      // Verifica se o cliente está em um estado válido antes de tentar logout
+      // Verifica se o cliente está em um estado válido antes de tentar o logout.
       if (clientData.client && clientData.client.info) {
-        // Tenta fazer logout com timeout para evitar bloqueio
+        // Tenta fazer logout com timeout para evitar bloqueio.
         await Promise.race([
           clientData.client.logout(),
           new Promise((_, reject) =>
@@ -216,7 +233,7 @@ export class WhatsappSessionManagerService {
       this.logger.warn(`Erro no processo de logout para ${userId}:`, error);
     } finally {
       try {
-        // Sempre tenta destruir o cliente, independente do resultado do logout
+        // Sempre tenta destruir o cliente, independentemente do resultado do logout.
         if (clientData.client) {
           await clientData.client.destroy();
         }
@@ -228,10 +245,10 @@ export class WhatsappSessionManagerService {
         );
       }
 
-      // Remove a sessão do mapa antes de tentar excluir os arquivos
+      // Remove a sessão do mapa antes de tentar excluir os arquivos.
       this.sessions.delete(userId);
 
-      // Tenta remover os arquivos da sessão
+      // Tenta remover os arquivos da sessão.
       try {
         if (fs.existsSync(dataPath)) {
           fs.rmSync(dataPath, { recursive: true, force: true });
