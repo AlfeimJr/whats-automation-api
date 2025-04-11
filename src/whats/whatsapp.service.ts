@@ -18,14 +18,15 @@ export class WhatsappSessionManagerService {
 
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     if (this.sessions.has(userId)) {
-      const existingData = this.sessions.get(userId);
-      // Verificar se o cliente está em estado válido
+      const clientData = this.sessions.get(userId);
       try {
-        await existingData.client.getState();
-        return existingData;
+        const state = await clientData.client.getState();
+        if (state === 'CONNECTED') {
+          return clientData;
+        }
       } catch (error) {
         this.logger.warn(
-          `Cliente em estado inválido para ${userId}, recriando...`,
+          `Estado do cliente inválido para ${userId}, recriando...`,
         );
         await this.logout(userId);
       }
@@ -39,17 +40,16 @@ export class WhatsappSessionManagerService {
   async createClient(userId: string): Promise<WhatsAppClientData> {
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
-    // Garantir que o diretório existe com as permissões corretas
+    // Garantir que o diretório existe
     fs.mkdirSync(dataPath, { recursive: true });
 
+    // Configuração simples do cliente, similar ao exemplo que funciona
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: userId,
         dataPath,
       }),
-      puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      },
+      // Sem opções extras que possam causar problemas
     });
 
     const clientData: WhatsAppClientData = {
@@ -59,60 +59,55 @@ export class WhatsappSessionManagerService {
       isReady: false,
     };
 
+    // Configuração de promessa simplificada
+    let resolveReady;
+    let rejectReady;
+
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      // Usar 'on' em vez de 'once' para capturar todos os eventos QR
-      client.on('qr', async (qr) => {
-        this.logger.log(`QR Code recebido para o usuário ${userId}`);
-        try {
-          const dataUrl = await QRCode.toDataURL(qr);
-          clientData.qrCode = dataUrl;
-          clientData.isReady = false;
-
-          // Salva o QR code em disco
-          const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-          const filePath = path.join(dataPath, 'qr.png');
-          fs.writeFileSync(filePath, base64Data, 'base64');
-          this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
-        } catch (error) {
-          this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
-        }
-      });
-
-      client.on('ready', () => {
-        this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
-        clientData.qrCode = null;
-        clientData.isReady = true;
-        resolve();
-      });
-
-      client.on('authenticated', () => {
-        this.logger.log(`Cliente autenticado para ${userId}`);
-        clientData.qrCode = null;
-      });
-
-      client.on('auth_failure', (msg) => {
-        this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
-        clientData.isReady = false;
-        reject(msg);
-      });
-
-      client.on('disconnected', async (reason) => {
-        this.logger.warn(`Cliente desconectado para ${userId}: ${reason}`);
-        clientData.qrCode = null;
-        clientData.isReady = false;
-
-        // Tentar reconectar automaticamente após 5 segundos
-        setTimeout(() => {
-          this.logger.log(`Tentando reconectar cliente para ${userId}`);
-          client.initialize().catch((err) => {
-            this.logger.error(`Erro ao reconectar para ${userId}:`, err);
-          });
-        }, 5000);
-      });
+      resolveReady = resolve;
+      rejectReady = reject;
     });
 
+    // Configurar eventos como no exemplo que funciona
+    client.on('qr', async (qr) => {
+      this.logger.log(`QR Code recebido para o usuário ${userId}`);
+      try {
+        const dataUrl = await QRCode.toDataURL(qr);
+        clientData.qrCode = dataUrl;
+        clientData.isReady = false;
+      } catch (error) {
+        this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
+      }
+    });
+
+    client.on('ready', () => {
+      this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
+      clientData.qrCode = null;
+      clientData.isReady = true;
+      resolveReady();
+    });
+
+    client.on('authenticated', () => {
+      this.logger.log(`Cliente autenticado para ${userId}`);
+      clientData.qrCode = null;
+    });
+
+    client.on('auth_failure', (msg) => {
+      this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
+      clientData.isReady = false;
+      rejectReady(msg);
+    });
+
+    client.on('disconnected', (reason) => {
+      this.logger.warn(`Cliente desconectado para ${userId}: ${reason}`);
+      clientData.isReady = false;
+      clientData.qrCode = null;
+    });
+
+    // Inicializar o cliente
     client.initialize().catch((err) => {
       this.logger.error(`Erro ao inicializar cliente para ${userId}:`, err);
+      rejectReady(err);
     });
 
     return clientData;
@@ -164,12 +159,27 @@ export class WhatsappSessionManagerService {
       if (!chat) throw new Error('Chat não encontrado');
       if (!chat.isGroup) throw new Error('O chat não é um grupo');
 
+      // Convertendo para GroupChat para acessar participants
       const groupChat = chat as GroupChat;
-      if (!groupChat.participants)
-        throw new Error('Participantes não disponíveis');
 
-      const mentionJids = groupChat.participants.map((p) => p.id._serialized);
-      return chat.sendMessage(message, { mentions: mentionJids });
+      // Abordagem semelhante ao exemplo que funciona
+      const mentions = [];
+
+      for (const participant of groupChat.participants) {
+        try {
+          const contact = await clientData.client.getContactById(
+            participant.id._serialized,
+          );
+          mentions.push(contact);
+        } catch (error) {
+          this.logger.warn(
+            `Não foi possível obter contato para ${participant.id._serialized}:`,
+            error,
+          );
+        }
+      }
+
+      return chat.sendMessage(message, { mentions });
     } catch (error) {
       this.logger.error(
         `Erro ao mencionar todos em ${chatId} para ${userId}:`,
@@ -190,27 +200,7 @@ export class WhatsappSessionManagerService {
       return { qr: clientData.qrCode };
     }
 
-    // Se não tiver QR code nem estiver pronto, provavelmente está inicializando
     return { ready: false };
-  }
-
-  async checkClientState(userId: string): Promise<string> {
-    if (!this.sessions.has(userId)) {
-      return 'NOT_INITIALIZED';
-    }
-
-    const clientData = this.sessions.get(userId);
-
-    try {
-      const state = await clientData.client.getState();
-      return state || 'UNKNOWN';
-    } catch (error) {
-      this.logger.warn(
-        `Erro ao verificar estado do cliente para ${userId}:`,
-        error,
-      );
-      return 'ERROR';
-    }
   }
 
   async logout(userId: string): Promise<void> {
@@ -227,16 +217,7 @@ export class WhatsappSessionManagerService {
     try {
       if (clientData.client) {
         try {
-          const state = await clientData.client.getState();
-          if (state) {
-            await Promise.race([
-              clientData.client.logout(),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Timeout no logout')), 10000),
-              ),
-            ]);
-            this.logger.log(`Logout realizado com sucesso para ${userId}`);
-          }
+          await clientData.client.logout();
         } catch (logoutError) {
           this.logger.warn(
             `Erro no processo de logout para ${userId}:`,
@@ -273,7 +254,6 @@ export class WhatsappSessionManagerService {
     }
   }
 
-  // Método para verificar periodicamente o estado de todos os clientes
   async checkAllSessions(): Promise<void> {
     for (const [userId, clientData] of this.sessions.entries()) {
       try {
