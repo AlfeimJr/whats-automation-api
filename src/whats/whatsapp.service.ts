@@ -14,12 +14,8 @@ interface WhatsAppClientData {
 @Injectable()
 export class WhatsappSessionManagerService {
   private readonly logger = new Logger(WhatsappSessionManagerService.name);
-  // Mapa onde a chave é o userId e o valor é a instância do WhatsApp para aquele usuário
   private sessions: Map<string, WhatsAppClientData> = new Map();
 
-  /**
-   * Retorna (ou cria, se não existir) uma instância do WhatsApp para o usuário.
-   */
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     if (this.sessions.has(userId)) {
       return this.sessions.get(userId);
@@ -29,18 +25,13 @@ export class WhatsappSessionManagerService {
     return clientData;
   }
 
-  /**
-   * Cria uma nova instância do WhatsApp client para um usuário específico.
-   */
   async createClient(userId: string): Promise<WhatsAppClientData> {
-    // Define o caminho para salvar os dados da sessão para esse usuário
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
-    // Cria o client com LocalAuth usando clientId e dataPath únicos
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: userId,
-        dataPath, // mesmo que dataPath: dataPath
+        dataPath,
       }),
     });
 
@@ -50,49 +41,36 @@ export class WhatsappSessionManagerService {
       qrCode: null,
     };
 
-    // Essa flag serve para garantir que o QR code seja processado apenas uma vez
-    let qrAlreadyProcessed = false;
-
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      // Utilize "on", mas verifique se já processou o QR
-      client.on('qr', async (qr) => {
-        // Se já processou, ignora as próximas emissões
-        if (qrAlreadyProcessed) {
-          return;
-        }
-        qrAlreadyProcessed = true;
+      // Registra o evento "qr" apenas uma vez para evitar múltiplas emissões
+      client.once('qr', async (qr) => {
         this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
         try {
           const dataUrl = await QRCode.toDataURL(qr);
           clientData.qrCode = dataUrl;
-          // Opcional: salvar o QR em disco
+          // Salva o QR code em disco (opcional)
           const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
           fs.mkdirSync(dataPath, { recursive: true });
           const filePath = path.join(dataPath, 'qr.png');
           fs.writeFileSync(filePath, base64Data, 'base64');
           this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
         } catch (error) {
-          // Se ocorrer erro, loga mas não altera a flag para tentar exibir novamente (se desejar)
           this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
         }
       });
 
-      // Evento "ready": resolve a promise
       client.once('ready', () => {
         this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
-        // Limpa o QR se a autenticação foi feita
         clientData.qrCode = null;
         resolve();
       });
 
-      // Em caso de falha na autenticação, rejeita a promise
       client.once('auth_failure', (msg) => {
         this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
         reject(msg);
       });
     });
 
-    // Inicializa o client (isso dispara a geração do QR se necessário)
     client.initialize();
     return clientData;
   }
