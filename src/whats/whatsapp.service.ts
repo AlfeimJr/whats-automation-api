@@ -47,6 +47,9 @@ export class WhatsappSessionManagerService {
       }),
     });
 
+    // Variável para armazenar o timer do QR code
+    let qrTimer: NodeJS.Timeout;
+
     const clientData: WhatsAppClientData = {
       client: client,
       qrCode: null,
@@ -62,6 +65,28 @@ export class WhatsappSessionManagerService {
             const filePath = path.join(dataPath, 'qr.png');
             fs.writeFileSync(filePath, base64Data, 'base64');
             this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
+
+            // Ao gerar o primeiro QR, inicia o timer de 2 minutos
+            if (!qrTimer) {
+              qrTimer = setTimeout(async () => {
+                this.logger.warn(
+                  `QR code para ${userId} expirou após 2 minutos. Reinicializando...`,
+                );
+                try {
+                  // Tenta destruir o client atual
+                  await client.destroy();
+                } catch (destroyError) {
+                  this.logger.error(
+                    `Erro ao destruir o cliente para ${userId}:`,
+                    destroyError,
+                  );
+                }
+                // Remove a sessão atual para permitir uma reinicialização
+                this.sessions.delete(userId);
+                // Opcionalmente, você pode disparar aqui uma nova tentativa de criação:
+                // this.createClient(userId);
+              }, 2 * 60 * 1000); // 2 minutos
+            }
           } catch (error) {
             if (error.message.includes('Target closed')) {
               this.logger.error(
@@ -74,6 +99,8 @@ export class WhatsappSessionManagerService {
         });
 
         client.on('ready', () => {
+          // Se a autenticação ocorrer, cancela o timer
+          if (qrTimer) clearTimeout(qrTimer);
           this.logger.log(
             `WhatsApp Client está pronto para o usuário ${userId}`,
           );
@@ -82,6 +109,7 @@ export class WhatsappSessionManagerService {
         });
 
         client.on('auth_failure', (msg) => {
+          if (qrTimer) clearTimeout(qrTimer);
           this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
           reject(msg);
         });
