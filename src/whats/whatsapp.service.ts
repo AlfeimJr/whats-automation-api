@@ -1,3 +1,4 @@
+// src/whatsapp/whatsapp-session-manager.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { Client, LocalAuth, Chat, GroupChat } from 'whatsapp-web.js';
 import * as QRCode from 'qrcode';
@@ -8,7 +9,6 @@ interface WhatsAppClientData {
   client: Client;
   clientReadyPromise: Promise<void>;
   qrCode: string | null;
-  isReady: boolean;
 }
 
 @Injectable()
@@ -18,20 +18,8 @@ export class WhatsappSessionManagerService {
 
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     if (this.sessions.has(userId)) {
-      const clientData = this.sessions.get(userId);
-      try {
-        const state = await clientData.client.getState();
-        if (state === 'CONNECTED') {
-          return clientData;
-        }
-      } catch (error) {
-        this.logger.warn(
-          `Estado do cliente inválido para ${userId}, recriando...`,
-        );
-        await this.logout(userId);
-      }
+      return this.sessions.get(userId);
     }
-
     const clientData = await this.createClient(userId);
     this.sessions.set(userId, clientData);
     return clientData;
@@ -40,167 +28,94 @@ export class WhatsappSessionManagerService {
   async createClient(userId: string): Promise<WhatsAppClientData> {
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
-    // Garantir que o diretório existe
-    fs.mkdirSync(dataPath, { recursive: true });
-
-    // Configuração simples do cliente, similar ao exemplo que funciona
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: userId,
         dataPath,
       }),
-      // Sem opções extras que possam causar problemas
     });
 
     const clientData: WhatsAppClientData = {
       client,
       clientReadyPromise: null,
       qrCode: null,
-      isReady: false,
     };
 
-    // Configuração de promessa simplificada
-    let resolveReady;
-    let rejectReady;
-
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
+      // Registra o evento "qr" apenas uma vez para evitar múltiplas emissões
+      client.once('qr', async (qr) => {
+        this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
+        try {
+          const dataUrl = await QRCode.toDataURL(qr);
+          clientData.qrCode = dataUrl;
+          // Salva o QR code em disco (opcional)
+          const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+          fs.mkdirSync(dataPath, { recursive: true });
+          const filePath = path.join(dataPath, 'qr.png');
+          fs.writeFileSync(filePath, base64Data, 'base64');
+          this.logger.log(`QR Code salvo para ${userId} em ${filePath}`);
+        } catch (error) {
+          this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
+        }
+      });
+
+      client.once('ready', () => {
+        this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
+        clientData.qrCode = null;
+        resolve();
+      });
+
+      client.once('auth_failure', (msg) => {
+        this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
+        reject(msg);
+      });
     });
 
-    // Configurar eventos como no exemplo que funciona
-    client.on('qr', async (qr) => {
-      this.logger.log(`QR Code recebido para o usuário ${userId}`);
-      try {
-        const dataUrl = await QRCode.toDataURL(qr);
-        clientData.qrCode = dataUrl;
-        clientData.isReady = false;
-      } catch (error) {
-        this.logger.error(`Erro ao gerar QR code para ${userId}:`, error);
-      }
-    });
-
-    client.on('ready', () => {
-      this.logger.log(`WhatsApp Client está pronto para o usuário ${userId}`);
-      clientData.qrCode = null;
-      clientData.isReady = true;
-      resolveReady();
-    });
-
-    client.on('authenticated', () => {
-      this.logger.log(`Cliente autenticado para ${userId}`);
-      clientData.qrCode = null;
-    });
-
-    client.on('auth_failure', (msg) => {
-      this.logger.error(`Falha na autenticação para ${userId}: ${msg}`);
-      clientData.isReady = false;
-      rejectReady(msg);
-    });
-
-    client.on('disconnected', (reason) => {
-      this.logger.warn(`Cliente desconectado para ${userId}: ${reason}`);
-      clientData.isReady = false;
-      clientData.qrCode = null;
-    });
-
-    // Inicializar o cliente
-    client.initialize().catch((err) => {
-      this.logger.error(`Erro ao inicializar cliente para ${userId}:`, err);
-      rejectReady(err);
-    });
-
+    client.initialize();
     return clientData;
   }
 
   async getChats(userId: string): Promise<{ id: string; name: string }[]> {
     const clientData = await this.getClientForUser(userId);
-
-    try {
-      await clientData.clientReadyPromise;
-      const chats = await clientData.client.getChats();
-      const groupChats = chats.filter((chat) => chat.isGroup);
-      this.logger.log(
-        `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
-      );
-      return groupChats.map((chat) => ({
-        id: chat.id._serialized,
-        name: chat.name || chat.id.user,
-      }));
-    } catch (error) {
-      this.logger.error(`Erro ao obter chats para ${userId}:`, error);
-      throw new Error(`Não foi possível obter os chats: ${error.message}`);
-    }
+    await clientData.clientReadyPromise;
+    const chats = await clientData.client.getChats();
+    const groupChats = chats.filter((chat) => chat.isGroup);
+    this.logger.log(
+      `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
+    );
+    return groupChats.map((chat) => ({
+      id: chat.id._serialized,
+      name: chat.name || chat.id.user,
+    }));
   }
 
   async sendMessage(userId: string, chatId: string, message: string) {
     const clientData = await this.getClientForUser(userId);
-
-    try {
-      await clientData.clientReadyPromise;
-      const chat = await clientData.client.getChatById(chatId);
-      if (!chat) throw new Error('Chat não encontrado');
-      return chat.sendMessage(message);
-    } catch (error) {
-      this.logger.error(
-        `Erro ao enviar mensagem para ${userId} em ${chatId}:`,
-        error,
-      );
-      throw new Error(`Não foi possível enviar a mensagem: ${error.message}`);
-    }
+    await clientData.clientReadyPromise;
+    const chat = await clientData.client.getChatById(chatId);
+    if (!chat) throw new Error('Chat não encontrado');
+    return chat.sendMessage(message);
   }
 
   async mentionEveryone(userId: string, chatId: string, message: string) {
     const clientData = await this.getClientForUser(userId);
-
-    try {
-      await clientData.clientReadyPromise;
-      const chat = await clientData.client.getChatById(chatId);
-      if (!chat) throw new Error('Chat não encontrado');
-      if (!chat.isGroup) throw new Error('O chat não é um grupo');
-
-      // Convertendo para GroupChat para acessar participants
-      const groupChat = chat as GroupChat;
-
-      // Abordagem semelhante ao exemplo que funciona
-      const mentions = [];
-
-      for (const participant of groupChat.participants) {
-        try {
-          const contact = await clientData.client.getContactById(
-            participant.id._serialized,
-          );
-          mentions.push(contact);
-        } catch (error) {
-          this.logger.warn(
-            `Não foi possível obter contato para ${participant.id._serialized}:`,
-            error,
-          );
-        }
-      }
-
-      return chat.sendMessage(message, { mentions });
-    } catch (error) {
-      this.logger.error(
-        `Erro ao mencionar todos em ${chatId} para ${userId}:`,
-        error,
-      );
-      throw new Error(`Não foi possível mencionar todos: ${error.message}`);
-    }
+    await clientData.clientReadyPromise;
+    const chat = await clientData.client.getChatById(chatId);
+    if (!chat) throw new Error('Chat não encontrado');
+    if (!chat.isGroup) throw new Error('O chat não é um grupo');
+    const groupChat = chat as GroupChat;
+    if (!groupChat.participants)
+      throw new Error('Participantes não disponíveis');
+    const mentionJids = groupChat.participants.map((p) => p.id._serialized);
+    return chat.sendMessage(message, { mentions: mentionJids });
   }
 
   async getQRCode(userId: string): Promise<{ qr?: string; ready?: boolean }> {
     const clientData = await this.getClientForUser(userId);
-
-    if (clientData.isReady) {
-      return { ready: true };
-    }
-
     if (clientData.qrCode) {
       return { qr: clientData.qrCode };
     }
-
-    return { ready: false };
+    return { ready: true };
   }
 
   async logout(userId: string): Promise<void> {
@@ -210,34 +125,32 @@ export class WhatsappSessionManagerService {
       );
       return;
     }
-
     const clientData = this.sessions.get(userId);
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
-
     try {
-      if (clientData.client) {
-        try {
-          await clientData.client.logout();
-        } catch (logoutError) {
-          this.logger.warn(
-            `Erro no processo de logout para ${userId}:`,
-            logoutError,
-          );
-        }
-
-        try {
-          await clientData.client.destroy();
-          this.logger.log(`Cliente destruído para o usuário ${userId}`);
-        } catch (destroyError) {
-          this.logger.warn(
-            `Erro ao destruir cliente para ${userId}:`,
-            destroyError,
-          );
-        }
+      if (clientData.client && clientData.client.info) {
+        await Promise.race([
+          clientData.client.logout(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Timeout no logout')), 10000),
+          ),
+        ]);
       }
+    } catch (error) {
+      this.logger.warn(`Erro no processo de logout para ${userId}:`, error);
     } finally {
+      try {
+        if (clientData.client) {
+          await clientData.client.destroy();
+        }
+        this.logger.log(`Cliente destruído para o usuário ${userId}`);
+      } catch (destroyError) {
+        this.logger.warn(
+          `Erro ao destruir cliente para ${userId}:`,
+          destroyError,
+        );
+      }
       this.sessions.delete(userId);
-
       try {
         if (fs.existsSync(dataPath)) {
           fs.rmSync(dataPath, { recursive: true, force: true });
@@ -249,29 +162,6 @@ export class WhatsappSessionManagerService {
         this.logger.warn(
           `Erro ao remover diretório de sessão para ${userId}:`,
           fsError,
-        );
-      }
-    }
-  }
-
-  async checkAllSessions(): Promise<void> {
-    for (const [userId, clientData] of this.sessions.entries()) {
-      try {
-        const state = await clientData.client.getState();
-        this.logger.debug(`Estado do cliente ${userId}: ${state}`);
-
-        if (!state) {
-          this.logger.warn(
-            `Cliente ${userId} desconectado, tentando reconectar...`,
-          );
-          clientData.client.initialize().catch((err) => {
-            this.logger.error(`Erro ao reconectar cliente ${userId}:`, err);
-          });
-        }
-      } catch (error) {
-        this.logger.warn(
-          `Erro ao verificar estado do cliente ${userId}:`,
-          error,
         );
       }
     }
