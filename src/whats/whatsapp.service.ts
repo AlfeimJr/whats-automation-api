@@ -15,7 +15,9 @@ interface WhatsAppClientData {
 export class WhatsappSessionManagerService {
   private readonly logger = new Logger(WhatsappSessionManagerService.name);
   private sessions: Map<string, WhatsAppClientData> = new Map();
-
+  private chatCache: Map<string, { data: any[]; timestamp: number }> =
+    new Map();
+  private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutos em milissegundos
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     if (this.sessions.has(userId)) {
       return this.sessions.get(userId);
@@ -42,9 +44,8 @@ export class WhatsappSessionManagerService {
     };
 
     clientData.clientReadyPromise = new Promise<void>((resolve, reject) => {
-      // Registra o evento "qr" apenas uma vez para evitar múltiplas emissões
       client.once('qr', async (qr) => {
-        this.logger.log(`QR Code recebido para o usuário ${userId}: ${qr}`);
+        this.logger.log(`QR Code recebido para o usuário ${userId}`);
         try {
           const dataUrl = await QRCode.toDataURL(qr);
           clientData.qrCode = dataUrl;
@@ -76,19 +77,36 @@ export class WhatsappSessionManagerService {
   }
 
   async getChats(userId: string): Promise<{ id: string; name: string }[]> {
+    // Verificar cache
+    const cache = this.chatCache.get(userId);
+    const now = Date.now();
+    if (cache && now - cache.timestamp < this.CACHE_TTL) {
+      this.logger.log(`Usando cache de chats para ${userId}`);
+      return cache.data;
+    }
+
+    // Buscar dados normalmente
     const clientData = await this.getClientForUser(userId);
     await clientData.clientReadyPromise;
     const chats = await clientData.client.getChats();
     const groupChats = chats.filter((chat) => chat.isGroup);
-    this.logger.log(
-      `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
-    );
-    return groupChats.map((chat) => ({
+
+    // Processar e armazenar no cache
+    const result = groupChats.map((chat) => ({
       id: chat.id._serialized,
       name: chat.name || chat.id.user,
     }));
-  }
 
+    this.chatCache.set(userId, {
+      data: result,
+      timestamp: now,
+    });
+
+    this.logger.log(
+      `Chats de grupo para ${userId}: ${groupChats.length} encontrados`,
+    );
+    return result;
+  }
   async sendMessage(userId: string, chatId: string, message: string) {
     const clientData = await this.getClientForUser(userId);
     await clientData.clientReadyPromise;
