@@ -30,7 +30,6 @@ export class WhatsAppController {
   @Get('chats')
   async listChats(@Req() req: Request) {
     const userId = req.user?.userId;
-    console.log('Chats para o usuário:', userId);
 
     const chats = await this.whatsappService.getChats(userId);
     return { chats };
@@ -41,7 +40,6 @@ export class WhatsAppController {
   @Get('qr')
   async getQrCode(@Req() req: Request) {
     const userId = req.user?.userId;
-    console.log('QR Code para o usuário:', userId);
 
     return this.whatsappService.getQRCode(userId);
   }
