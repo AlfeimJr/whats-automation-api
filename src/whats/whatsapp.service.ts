@@ -41,6 +41,12 @@ export class WhatsappSessionManagerService {
           '--disable-gpu',
           '--disable-web-security',
           '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-dev-shm-usage', // evita uso do /dev/shm que pode ser limitado
+          '--disable-software-rasterizer',
+          '--disable-extensions',
+          '--disable-default-apps',
+          '--disable-sync',
+          '--no-zygote',
         ],
         dumpio: true,
       },
