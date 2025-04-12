@@ -40,8 +40,13 @@ export class WhatsAppController {
   @Get('qr')
   async getQrCode(@Req() req: Request) {
     const userId = req.user?.userId;
-
-    return this.whatsappService.getQRCode(userId);
+    const qr = await this.whatsappService.getQRCode(userId);
+    // Se houver um código QR (string não vazia), retornamos-o e ready: false
+    if (qr && qr.trim().length > 0) {
+      return { qr, ready: false };
+    }
+    // Caso contrário, presumimos que o cliente esteja autenticado
+    return { ready: true };
   }
 
   // Rota de envio de mensagem comum:
