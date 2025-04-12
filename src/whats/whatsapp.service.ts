@@ -45,7 +45,7 @@ export class WhatsappSessionManagerService {
         dataPath,
       }),
       puppeteer: {
-        headless: false, // Força a abertura do Chromium com interface gráfica
+        args: ['--no-sandbox', '--disable-setuid-sandbox'], // Força a abertura do Chromium com interface gráfica
         // Em alguns ambientes de produção pode ser necessário ajustar os args, por exemplo:
         // args: ['--no-sandbox', '--disable-setuid-sandbox'],
       },
