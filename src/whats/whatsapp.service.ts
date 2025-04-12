@@ -40,14 +40,15 @@ export class WhatsappSessionManagerService {
 
     // Aqui é onde adicionamos as configurações de puppeteer para exibir o Chromium (headful)
     const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: userId,
-        dataPath,
-      }),
+      authStrategy: new LocalAuth(),
       puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'], // Força a abertura do Chromium com interface gráfica
-        // Em alguns ambientes de produção pode ser necessário ajustar os args, por exemplo:
-        // args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true,
+        args: ['--no-sandbox', '--disable-gpu'],
+      },
+      webVersionCache: {
+        type: 'remote',
+        remotePath:
+          'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
       },
     });
 
