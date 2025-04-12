@@ -38,11 +38,17 @@ export class WhatsappSessionManagerService {
   async createClient(userId: string) {
     const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
 
+    // Aqui é onde adicionamos as configurações de puppeteer para exibir o Chromium (headful)
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: userId,
         dataPath,
       }),
+      puppeteer: {
+        headless: false, // Força a abertura do Chromium com interface gráfica
+        // Em alguns ambientes de produção pode ser necessário ajustar os args, por exemplo:
+        // args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      },
     });
 
     let firstQrShown = false;
@@ -71,18 +77,6 @@ export class WhatsappSessionManagerService {
               dataUrl.split(',')[1],
               'base64',
             );
-
-            // Timer de 2 minutos (120000 ms)
-            if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
-            qrExpirationTimer = setTimeout(async () => {
-              this.logger.warn(`QR p/ ${userId} expirou após 2 min`);
-              try {
-                await client.destroy();
-              } catch (e) {
-                this.logger.error(`Erro destroy client p/ ${userId}:`, e);
-              }
-              this.sessions.delete(userId);
-            }, 2 * 60 * 1000);
           } catch (err) {
             this.logger.error(`Erro ao gerar QR p/ ${userId}`, err);
           }

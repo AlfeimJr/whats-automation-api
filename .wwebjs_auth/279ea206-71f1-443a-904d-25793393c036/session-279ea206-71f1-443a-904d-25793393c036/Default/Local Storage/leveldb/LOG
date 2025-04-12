@@ -1,2 +1,3 @@
-2025/04/11-11:48:43.722 6094 Creating DB C:\Users\natal\Desktop\alfa-api\.wwebjs_auth\279ea206-71f1-443a-904d-25793393c036\session-279ea206-71f1-443a-904d-25793393c036\Default\Local Storage\leveldb since it was missing.
-2025/04/11-11:48:43.736 6094 Reusing MANIFEST C:\Users\natal\Desktop\alfa-api\.wwebjs_auth\279ea206-71f1-443a-904d-25793393c036\session-279ea206-71f1-443a-904d-25793393c036\Default\Local Storage\leveldb/MANIFEST-000001
+2025/04/11-22:18:41.822 4a10 Reusing MANIFEST C:\Users\natal\Desktop\alfa-api\.wwebjs_auth\279ea206-71f1-443a-904d-25793393c036\session-279ea206-71f1-443a-904d-25793393c036\Default\Local Storage\leveldb/MANIFEST-000001
+2025/04/11-22:18:41.823 4a10 Recovering log #4
+2025/04/11-22:18:41.823 4a10 Reusing old log C:\Users\natal\Desktop\alfa-api\.wwebjs_auth\279ea206-71f1-443a-904d-25793393c036\session-279ea206-71f1-443a-904d-25793393c036\Default\Local Storage\leveldb/000004.log 
