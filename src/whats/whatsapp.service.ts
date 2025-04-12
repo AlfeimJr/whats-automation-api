@@ -40,15 +40,11 @@ export class WhatsappSessionManagerService {
 
     // Aqui é onde adicionamos as configurações de puppeteer para exibir o Chromium (headful)
     const client = new Client({
-      authStrategy: new LocalAuth(),
+      authStrategy: new LocalAuth({ clientId: userId }),
       puppeteer: {
-        headless: true,
+        headless: false,
         args: ['--no-sandbox', '--disable-gpu'],
-      },
-      webVersionCache: {
-        type: 'remote',
-        remotePath:
-          'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+        dumpio: true, // Ativa logs detalhados
       },
     });
 
@@ -111,12 +107,11 @@ export class WhatsappSessionManagerService {
       this.logger.log(`Usando cache de chats para ${userId}`);
       return cache.data;
     }
-    console.log(`carregando chats`);
 
     // Garante que o cliente esteja pronto
     const clientData = await this.getClientForUser(userId);
     await clientData.clientReadyPromise;
-
+    console.log(`carregando chats`);
     const chats = await clientData.client.getChats();
     console.log(chats);
     const groupChats = chats.filter((chat) => chat.isGroup);
