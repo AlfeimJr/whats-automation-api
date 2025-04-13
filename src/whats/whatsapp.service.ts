@@ -58,7 +58,7 @@ export class WhatsappSessionManagerService {
       client,
       qrCode: null,
       clientReadyPromise: new Promise<void>((resolve, reject) => {
-        // Evento emitido quando é gerado um novo QR
+        // Evento emitido quando é gerado um novo QR code
         client.on('qr', async (qr: string) => {
           // Se já houve um QR gerado e não expirou, ignora o novo evento
           if (firstQrShown) {
@@ -68,23 +68,24 @@ export class WhatsappSessionManagerService {
           firstQrShown = true;
           this.logger.log(`Novo QR code para ${userId}`);
           try {
-            const asciiQr = await QRCode.toString(qr, {
-              type: 'utf8',
-              small: true,
-            });
-            clientData.qrCode = asciiQr;
+            // Gera o DataURL (Base64) do QR code
+            const base64Qr = await QRCode.toDataURL(qr);
+            clientData.qrCode = base64Qr;
             // Cria a pasta exclusiva para os arquivos de QR code
             fs.mkdirSync(qrDataPath, { recursive: true });
-            fs.writeFileSync(path.join(qrDataPath, 'qr.txt'), asciiQr, 'utf8');
-            fs.writeFileSync(path.join(qrDataPath, 'qr_data.txt'), qr, 'utf8');
+            // Salva o Base64 do QR code em um arquivo (opcional)
+            fs.writeFileSync(
+              path.join(qrDataPath, 'qr_base64.txt'),
+              base64Qr,
+              'utf8',
+            );
 
-            this.logger.log(`QR code ASCII gerado e salvo para ${userId}`);
-            // Define um timer para expirar o QR após 2 minutos e reiniciar o flag
+            this.logger.log(`QR code Base64 gerado e salvo para ${userId}`);
+            // Define um timer para expirar o QR após 2 minutos e permitir a renovação
             qrExpirationTimer = setTimeout(() => {
               if (clientData.qrCode) {
                 this.logger.log(`QR code expirado para ${userId}`);
                 clientData.qrCode = null;
-                // Permite a renovação do QR após expirar
                 firstQrShown = false;
               }
             }, 2 * 60 * 1000);
@@ -199,7 +200,6 @@ export class WhatsappSessionManagerService {
       if (!chat.isGroup)
         throw new Error(`Chat ${chatId} não é um grupo para ${userId}`);
 
-      // Extraindo os participantes para gerar as menções
       const groupChat = chat as any;
       const mentions = groupChat.participants.map(
         (participant: any) => participant.id._serialized,
@@ -215,7 +215,7 @@ export class WhatsappSessionManagerService {
   }
 
   /**
-   * Retorna o QR code (em formato ASCII) caso o cliente ainda não esteja autenticado.
+   * Retorna o QR code (em formato Base64) caso o cliente ainda não esteja autenticado.
    */
   async getQRCode(userId: string): Promise<string> {
     try {
