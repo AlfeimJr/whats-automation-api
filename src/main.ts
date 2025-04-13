@@ -18,7 +18,7 @@ async function bootstrap() {
 
   const options = new DocumentBuilder();
   app.enableCors({
-    origin: 'https://whats-automation.netlify.app',
+    origin: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
   });
