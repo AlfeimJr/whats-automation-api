@@ -1,24 +1,28 @@
-// whatsapp-session-manager.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as QRCode from 'qrcode'; // Usado para gerar o QR code em formato ASCII
+import * as QRCode from 'qrcode';
 
 interface WhatsAppClientData {
   client: Client;
   clientReadyPromise: Promise<void>;
-  qrCode: string | null; // Armazena o QR code em formato ASCII
+  qrCode: string | null;
 }
 
 @Injectable()
 export class WhatsappSessionManagerService {
   private readonly logger = new Logger(WhatsappSessionManagerService.name);
+  // Mapa para gerenciar clientes separados por usuário
   private sessions: Map<string, WhatsAppClientData> = new Map();
+  // Cache para os chats, se for necessário para reduzir chamadas à API
   private chatCache: Map<string, { data: any[]; timestamp: number }> =
     new Map();
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
+  /**
+   * Retorna o cliente associado ao usuário. Se não existir, cria uma nova instância.
+   */
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     this.logger.log(`getClientForUser chamado para ${userId}`);
     if (this.sessions.has(userId)) {
@@ -29,59 +33,70 @@ export class WhatsappSessionManagerService {
     return clientData;
   }
 
+  /**
+   * Cria o cliente do WhatsApp para o usuário e configura os eventos de QR, ready,
+   * auth_failure e disconnected. Cada instância usa um diretório exclusivo para salvar
+   * os QR codes, sem interferir nos dados de autenticação (LocalAuth).
+   */
   async createClient(userId: string): Promise<WhatsAppClientData> {
-    const dataPath = path.join(process.cwd(), '.wwebjs_auth', userId);
+    // Diretório para salvar os arquivos de QR code, separado do diretório de autenticação
+    const qrDataPath = path.join(process.cwd(), '.wwebjs_qr', userId);
 
+    // A estratégia de autenticação do whatsapp-web.js já isola os dados por usuário
     const client = new Client({
       authStrategy: new LocalAuth({ clientId: userId }),
       puppeteer: {
-        headless: true, // Modo headless para produção
+        headless: true,
         dumpio: true,
       },
     });
 
+    // Flag para impedir que QR codes sejam substituídos antes de expirar
     let firstQrShown = false;
     let qrExpirationTimer: NodeJS.Timeout;
     const clientData: WhatsAppClientData = {
       client,
       qrCode: null,
       clientReadyPromise: new Promise<void>((resolve, reject) => {
+        // Evento emitido quando é gerado um novo QR
         client.on('qr', async (qr: string) => {
-          // Ignora a renovação do QR se já tiver sido exibido
+          // Se já houve um QR gerado e não expirou, ignora o novo evento
           if (firstQrShown) {
             this.logger.log(`Renovação do QR ignorada para ${userId}`);
             return;
           }
           firstQrShown = true;
           this.logger.log(`Novo QR code para ${userId}`);
-
           try {
-            // Gera o QR code ASCII usando QRCode.toString com type 'utf8'
             const asciiQr = await QRCode.toString(qr, {
               type: 'utf8',
               small: true,
             });
             clientData.qrCode = asciiQr;
+            // Cria a pasta exclusiva para os arquivos de QR code
+            fs.mkdirSync(qrDataPath, { recursive: true });
+            fs.writeFileSync(path.join(qrDataPath, 'qr.txt'), asciiQr, 'utf8');
+            fs.writeFileSync(path.join(qrDataPath, 'qr_data.txt'), qr, 'utf8');
 
-            // Salva o QR code ASCII em disco (opcional)
-            fs.mkdirSync(dataPath, { recursive: true });
-            fs.writeFileSync(path.join(dataPath, 'qr.txt'), asciiQr, 'utf8');
-            fs.writeFileSync(path.join(dataPath, 'qr_data.txt'), qr, 'utf8');
-
-            this.logger.log(`QR code ASCII gerado para ${userId}`);
-
-            // Define temporizador para expirar o QR após 2 minutos
+            this.logger.log(`QR code ASCII gerado e salvo para ${userId}`);
+            // Define um timer para expirar o QR após 2 minutos e reiniciar o flag
             qrExpirationTimer = setTimeout(() => {
               if (clientData.qrCode) {
                 this.logger.log(`QR code expirado para ${userId}`);
                 clientData.qrCode = null;
+                // Permite a renovação do QR após expirar
+                firstQrShown = false;
               }
             }, 2 * 60 * 1000);
           } catch (err) {
             this.logger.error(`Erro ao gerar QR para ${userId}`, err);
             try {
-              fs.mkdirSync(dataPath, { recursive: true });
-              fs.writeFileSync(path.join(dataPath, 'qr_data.txt'), qr, 'utf8');
+              fs.mkdirSync(qrDataPath, { recursive: true });
+              fs.writeFileSync(
+                path.join(qrDataPath, 'qr_data.txt'),
+                qr,
+                'utf8',
+              );
             } catch (fsErr) {
               this.logger.error(`Erro ao salvar QR data para ${userId}`, fsErr);
             }
@@ -92,20 +107,21 @@ export class WhatsappSessionManagerService {
           }
         });
 
+        // Evento emitido quando o cliente está autenticado e pronto para uso
         client.on('ready', () => {
           if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
-          this.logger.log(`Client [${userId}] pronto (autenticado)`);
-          // *** Comentei a linha abaixo para preservar o QR code para o endpoint ***
-          // clientData.qrCode = null;
+          this.logger.log(`Cliente [${userId}] pronto (autenticado)`);
           resolve();
         });
 
+        // Evento emitido em caso de falha na autenticação
         client.on('auth_failure', (msg) => {
           if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
-          this.logger.error(`Auth fail para ${userId}: ${msg}`);
+          this.logger.error(`Falha de autenticação para ${userId}: ${msg}`);
           reject(msg);
         });
 
+        // Se o cliente for desconectado, limpa o timer de QR
         client.on('disconnected', (reason) => {
           this.logger.warn(`Cliente desconectado para ${userId}: ${reason}`);
           if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
@@ -123,6 +139,10 @@ export class WhatsappSessionManagerService {
     return clientData;
   }
 
+  /**
+   * Retorna a lista de chats (apenas grupos) do usuário. Utiliza cache para reduzir
+   * chamadas, respeitando o tempo de expiração definido.
+   */
   async getChats(userId: string): Promise<{ id: string; name: string }[]> {
     this.logger.log(`getChats chamado para ${userId}`);
     const cache = this.chatCache.get(userId);
@@ -149,6 +169,9 @@ export class WhatsappSessionManagerService {
     }
   }
 
+  /**
+   * Envia mensagem para um determinado chat.
+   */
   async sendMessage(userId: string, chatId: string, message: string) {
     try {
       const clientData = await this.getClientForUser(userId);
@@ -163,6 +186,9 @@ export class WhatsappSessionManagerService {
     }
   }
 
+  /**
+   * Menciona todos os participantes de um grupo, enviando uma mensagem com as menções.
+   */
   async mentionEveryone(userId: string, chatId: string, message: string) {
     try {
       const clientData = await this.getClientForUser(userId);
@@ -172,6 +198,8 @@ export class WhatsappSessionManagerService {
         throw new Error(`Chat ${chatId} não encontrado para ${userId}`);
       if (!chat.isGroup)
         throw new Error(`Chat ${chatId} não é um grupo para ${userId}`);
+
+      // Extraindo os participantes para gerar as menções
       const groupChat = chat as any;
       const mentions = groupChat.participants.map(
         (participant: any) => participant.id._serialized,
@@ -186,27 +214,31 @@ export class WhatsappSessionManagerService {
     }
   }
 
-  // Método modificado que aguarda até que o QR code seja gerado antes de retornar
+  /**
+   * Retorna o QR code (em formato ASCII) caso o cliente ainda não esteja autenticado.
+   */
   async getQRCode(userId: string): Promise<string> {
     try {
       const clientData = await this.getClientForUser(userId);
       let attempts = 0;
-      // Aguarda até que o QR code seja gerado ou até que o cliente seja autenticado
+      // Aguarda que ou o cliente seja autenticado ou que o QR esteja disponível
       while (!clientData.client.info && !clientData.qrCode && attempts < 10) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         attempts++;
       }
-      // Se o cliente ainda não estiver autenticado e o QR code foi gerado, retorna-o
       if (!clientData.client.info && clientData.qrCode) {
         return clientData.qrCode;
       }
-      return ''; // Retorna vazio se o cliente estiver autenticado ou se não houver QR code
+      return '';
     } catch (error) {
       this.logger.error(`Erro ao obter QR code para ${userId}`, error);
       throw error;
     }
   }
 
+  /**
+   * Realiza o logout do cliente, destruindo a instância e removendo-a do gerenciador de sessões.
+   */
   async logout(userId: string): Promise<void> {
     if (!this.sessions.has(userId)) {
       this.logger.warn(`Tentativa de logout de userId inexistente: ${userId}`);
@@ -243,6 +275,9 @@ export class WhatsappSessionManagerService {
     }
   }
 
+  /**
+   * Retorna o status da conexão do cliente para o usuário.
+   */
   async getConnectionStatus(userId: string): Promise<string> {
     try {
       const clientData = await this.getClientForUser(userId);
