@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import { Client, LocalAuth, Message } from 'whatsapp-web.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as QRCode from 'qrcode';
+import axios from 'axios';
 
 interface WhatsAppClientData {
   client: Client;
@@ -13,283 +14,236 @@ interface WhatsAppClientData {
 @Injectable()
 export class WhatsappSessionManagerService {
   private readonly logger = new Logger(WhatsappSessionManagerService.name);
-  // Mapa para gerenciar clientes separados por usuário
   private sessions: Map<string, WhatsAppClientData> = new Map();
-  // Cache para os chats, se for necessário para reduzir chamadas à API
   private chatCache: Map<string, { data: any[]; timestamp: number }> =
     new Map();
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
-  /**
-   * Retorna o cliente associado ao usuário. Se não existir, cria uma nova instância.
-   */
+  /** Cria ou retorna uma instância LocalAuth isolada por usuário */
+  private getAuthStrategy(userId: string): LocalAuth {
+    const sessionDir = path.join(process.cwd(), 'whatsapp-sessions', userId);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    return new LocalAuth({
+      clientId: userId,
+      dataPath: sessionDir, // estado de auth e sessão aqui
+    });
+  }
+
+  /** Garante apenas uma criação concorrente de cliente por usuário */
   async getClientForUser(userId: string): Promise<WhatsAppClientData> {
     this.logger.log(`getClientForUser chamado para ${userId}`);
     if (this.sessions.has(userId)) {
       return this.sessions.get(userId)!;
     }
+    // placeholder para bloquear chamadas concorrentes
+    this.sessions.set(userId, {} as WhatsAppClientData);
     const clientData = await this.createClient(userId);
     this.sessions.set(userId, clientData);
     return clientData;
   }
 
-  /**
-   * Cria o cliente do WhatsApp para o usuário e configura os eventos de QR, ready,
-   * auth_failure e disconnected. Cada instância usa um diretório exclusivo para salvar
-   * os QR codes, sem interferir nos dados de autenticação (LocalAuth).
-   */
-  async createClient(userId: string): Promise<WhatsAppClientData> {
-    // Diretório para salvar os arquivos de QR code, separado do diretório de autenticação
-    const qrDataPath = path.join(process.cwd(), '.wwebjs_qr', userId);
+  /** Cria a instância do Client, QR code e listeners isolados por usuário */
+  private async createClient(userId: string): Promise<WhatsAppClientData> {
+    const sessionDir = path.join(process.cwd(), 'whatsapp-sessions', userId);
+    const qrDir = path.join(sessionDir, 'qr');
 
-    // A estratégia de autenticação do whatsapp-web.js já isola os dados por usuário
     const client = new Client({
-      authStrategy: new LocalAuth({ clientId: userId }),
-      puppeteer: {
-        headless: true,
-        dumpio: true,
-      },
+      authStrategy: this.getAuthStrategy(userId),
+      puppeteer: { headless: true, dumpio: true },
     });
 
-    // Flag para impedir que QR codes sejam substituídos antes de expirar
     let firstQrShown = false;
     let qrExpirationTimer: NodeJS.Timeout;
+
     const clientData: WhatsAppClientData = {
       client,
       qrCode: null,
       clientReadyPromise: new Promise<void>((resolve, reject) => {
-        // Evento emitido quando é gerado um novo QR code
-        client.on('qr', async (qr: string) => {
-          // Se já houve um QR gerado e não expirou, ignora o novo evento
+        client.on('qr', async (qr) => {
           if (firstQrShown) {
-            this.logger.log(`Renovação do QR ignorada para ${userId}`);
+            this.logger.log(`Ignorando renovação de QR para ${userId}`);
             return;
           }
           firstQrShown = true;
-          this.logger.log(`Novo QR code para ${userId}`);
+          this.logger.log(`Novo QR gerado para ${userId}`);
           try {
-            // Gera o DataURL (Base64) do QR code
-            const base64Qr = await QRCode.toDataURL(qr);
-            clientData.qrCode = base64Qr;
-            // Cria a pasta exclusiva para os arquivos de QR code
-            fs.mkdirSync(qrDataPath, { recursive: true });
-            // Salva o Base64 do QR code em um arquivo (opcional)
-            fs.writeFileSync(
-              path.join(qrDataPath, 'qr_base64.txt'),
-              base64Qr,
-              'utf8',
-            );
-
-            this.logger.log(`QR code Base64 gerado e salvo para ${userId}`);
-            // Define um timer para expirar o QR após 2 minutos e permitir a renovação
+            const base64 = await QRCode.toDataURL(qr);
+            clientData.qrCode = base64;
+            fs.mkdirSync(qrDir, { recursive: true });
+            fs.writeFileSync(path.join(qrDir, 'qr_base64.txt'), base64, 'utf8');
+            this.logger.log(`QR salvo em Base64 para ${userId}`);
             qrExpirationTimer = setTimeout(() => {
-              if (clientData.qrCode) {
-                this.logger.log(`QR code expirado para ${userId}`);
-                clientData.qrCode = null;
-                firstQrShown = false;
-              }
+              this.logger.log(`QR expirado para ${userId}`);
+              clientData.qrCode = null;
+              firstQrShown = false;
             }, 2 * 60 * 1000);
           } catch (err) {
             this.logger.error(`Erro ao gerar QR para ${userId}`, err);
             try {
-              fs.mkdirSync(qrDataPath, { recursive: true });
-              fs.writeFileSync(
-                path.join(qrDataPath, 'qr_data.txt'),
-                qr,
-                'utf8',
-              );
-            } catch (fsErr) {
-              this.logger.error(`Erro ao salvar QR data para ${userId}`, fsErr);
+              fs.mkdirSync(qrDir, { recursive: true });
+              fs.writeFileSync(path.join(qrDir, 'qr_raw.txt'), qr, 'utf8');
+            } catch {
+              this.logger.error(`Falha ao salvar QR raw para ${userId}`);
             }
-            clientData.qrCode = `Escaneie este código: ${qr.substring(
-              0,
-              20,
-            )}...`;
+            clientData.qrCode = `Escaneie: ${qr.slice(0, 20)}...`;
           }
         });
 
-        // Evento emitido quando o cliente está autenticado e pronto para uso
         client.on('ready', () => {
           if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
-          this.logger.log(`Cliente [${userId}] pronto (autenticado)`);
+          this.logger.log(`Cliente pronto para ${userId}`);
+          client.on('message', async (msg: Message) => {
+            if (msg.fromMe) return; // ignora mensagens próprias
+            if (!msg.body.startsWith('/ai ')) return; // só processa /ai
+            const prompt = msg.body.slice(4);
+            this.logger.log(`Prompt IA de ${userId}: ${prompt}`);
+            try {
+              const reply = await this.getChatGptResponse(prompt);
+              await msg.reply(reply);
+            } catch (e) {
+              this.logger.error(`Erro IA para ${userId}`, e);
+              await msg.reply('Desculpe, falha ao processar seu pedido.');
+            }
+          });
           resolve();
         });
 
-        // Evento emitido em caso de falha na autenticação
         client.on('auth_failure', (msg) => {
           if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
-          this.logger.error(`Falha de autenticação para ${userId}: ${msg}`);
-          reject(msg);
+          this.logger.error(`Falha de auth em ${userId}: ${msg}`);
+          reject(new Error(msg));
         });
 
-        // Se o cliente for desconectado, limpa o timer de QR
         client.on('disconnected', (reason) => {
-          this.logger.warn(`Cliente desconectado para ${userId}: ${reason}`);
+          this.logger.warn(`Desconectado ${userId}: ${reason}`);
           if (qrExpirationTimer) clearTimeout(qrExpirationTimer);
         });
       }),
     };
 
-    try {
-      client.initialize();
-    } catch (error) {
-      this.logger.error(`Erro ao inicializar cliente para ${userId}`, error);
-      throw error;
-    }
-
+    client.initialize();
     return clientData;
   }
 
-  /**
-   * Retorna a lista de chats (apenas grupos) do usuário. Utiliza cache para reduzir
-   * chamadas, respeitando o tempo de expiração definido.
-   */
+  /** Chama OpenAI para obter resposta */
+  private async getChatGptResponse(prompt: string): Promise<string> {
+    const res = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        store: true,
+        messages: [
+          {
+            role: 'system',
+            content: 'Você é um assistente virtual para agendamentos.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: 150,
+        temperature: 0.7,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer YOUR_OPENAI_KEY`,
+        },
+      },
+    );
+    return res.data.choices[0].message.content.trim();
+  }
+
+  /** Lista apenas grupos, com cache de 5 minutos */
   async getChats(userId: string): Promise<{ id: string; name: string }[]> {
-    this.logger.log(`getChats chamado para ${userId}`);
-    const cache = this.chatCache.get(userId);
     const now = Date.now();
-    if (cache && now - cache.timestamp < this.CACHE_TTL) {
-      this.logger.log(`Usando cache de chats para ${userId}`);
-      return cache.data;
+    const cached = this.chatCache.get(userId);
+    if (cached && now - cached.timestamp < this.CACHE_TTL) {
+      this.logger.log(`Cache de chats para ${userId}`);
+      return cached.data;
     }
-    try {
-      const clientData = await this.getClientForUser(userId);
-      await clientData.clientReadyPromise;
-      const chats = await clientData.client.getChats();
-      const groupChats = chats.filter((chat) => chat.isGroup);
-      this.logger.log(`Encontrados ${groupChats.length} grupos para ${userId}`);
-      const result = groupChats.map((chat) => ({
-        id: chat.id._serialized,
-        name: chat.name || chat.id.user,
+    const { client, clientReadyPromise } = await this.getClientForUser(userId);
+    await clientReadyPromise;
+    const chats = await client.getChats();
+    const groups = chats
+      .filter((c) => c.isGroup)
+      .map((c) => ({
+        id: c.id._serialized,
+        name: c.name || c.id.user,
       }));
-      this.chatCache.set(userId, { data: result, timestamp: now });
-      return result;
-    } catch (error) {
-      this.logger.error(`Erro ao obter chats para ${userId}`, error);
-      throw error;
-    }
+    this.chatCache.set(userId, { data: groups, timestamp: now });
+    this.logger.log(`Encontrados ${groups.length} grupos para ${userId}`);
+    return groups;
   }
 
-  /**
-   * Envia mensagem para um determinado chat.
-   */
+  /** Envia mensagem simples */
   async sendMessage(userId: string, chatId: string, message: string) {
-    try {
-      const clientData = await this.getClientForUser(userId);
-      await clientData.clientReadyPromise;
-      return clientData.client.sendMessage(chatId, message);
-    } catch (error) {
-      this.logger.error(
-        `Erro ao enviar mensagem para ${chatId} (usuário ${userId})`,
-        error,
-      );
-      throw error;
-    }
+    const { client, clientReadyPromise } = await this.getClientForUser(userId);
+    await clientReadyPromise;
+    return client.sendMessage(chatId, message);
   }
 
-  /**
-   * Menciona todos os participantes de um grupo, enviando uma mensagem com as menções.
-   */
+  /** Menciona todo mundo no grupo */
   async mentionEveryone(userId: string, chatId: string, message: string) {
-    try {
-      const clientData = await this.getClientForUser(userId);
-      await clientData.clientReadyPromise;
-      const chat = await clientData.client.getChatById(chatId);
-      if (!chat)
-        throw new Error(`Chat ${chatId} não encontrado para ${userId}`);
-      if (!chat.isGroup)
-        throw new Error(`Chat ${chatId} não é um grupo para ${userId}`);
-
-      const groupChat = chat as any;
-      const mentions = groupChat.participants.map(
-        (participant: any) => participant.id._serialized,
-      );
-      return clientData.client.sendMessage(chatId, message, { mentions });
-    } catch (error) {
-      this.logger.error(
-        `Erro ao mencionar todos em ${chatId} (usuário ${userId})`,
-        error,
-      );
-      throw error;
-    }
+    const { client, clientReadyPromise } = await this.getClientForUser(userId);
+    await clientReadyPromise;
+    const chat = await client.getChatById(chatId);
+    if (!chat || !chat.isGroup) throw new Error(`Chat ${chatId} não é grupo.`);
+    const mentions = (chat as any).participants.map(
+      (p: any) => p.id._serialized,
+    );
+    return client.sendMessage(chatId, message, { mentions });
   }
 
-  /**
-   * Retorna o QR code (em formato Base64) caso o cliente ainda não esteja autenticado.
-   */
+  /** Obtém QR code Base64 enquanto não autenticado */
   async getQRCode(userId: string): Promise<string> {
-    try {
-      const clientData = await this.getClientForUser(userId);
-      let attempts = 0;
-      // Aguarda que ou o cliente seja autenticado ou que o QR esteja disponível
-      while (!clientData.client.info && !clientData.qrCode && attempts < 10) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        attempts++;
-      }
-      if (!clientData.client.info && clientData.qrCode) {
-        return clientData.qrCode;
-      }
-      return '';
-    } catch (error) {
-      this.logger.error(`Erro ao obter QR code para ${userId}`, error);
-      throw error;
+    const { client, clientReadyPromise, qrCode } = await this.getClientForUser(
+      userId,
+    );
+    let attempts = 0;
+    while (!client.info && !qrCode && attempts++ < 10) {
+      await new Promise((res) => setTimeout(res, 1000));
     }
+    return client.info ? '' : qrCode || '';
   }
 
-  /**
-   * Realiza o logout do cliente, destruindo a instância e removendo-a do gerenciador de sessões.
-   */
+  /** Logout e limpeza de arquivos de sessão */
   async logout(userId: string): Promise<void> {
     if (!this.sessions.has(userId)) {
-      this.logger.warn(`Tentativa de logout de userId inexistente: ${userId}`);
+      this.logger.warn(`Logout: userId ${userId} não existe`);
       return;
     }
-    const clientData = this.sessions.get(userId)!;
+    const { client } = this.sessions.get(userId)!;
     try {
-      if (clientData.client && clientData.client.info) {
+      if (client.info) {
         await Promise.race([
-          clientData.client.logout(),
-          new Promise((_, reject) =>
-            setTimeout(
-              () => reject(new Error('Timeout durante o logout')),
-              10000,
-            ),
+          client.logout(),
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error('Logout timeout')), 10000),
           ),
         ]);
       }
-    } catch (error) {
-      this.logger.warn(`Erro no logout para ${userId}:`, error);
-    } finally {
-      try {
-        if (clientData.client) {
-          await clientData.client.destroy();
-        }
-        this.logger.log(`Cliente destruído para ${userId}`);
-      } catch (destroyError) {
-        this.logger.warn(
-          `Erro ao destruir cliente para ${userId}:`,
-          destroyError,
-        );
-      }
-      this.sessions.delete(userId);
+    } catch (e) {
+      this.logger.warn(`Erro no logout de ${userId}`, e);
     }
+    try {
+      await client.destroy();
+      this.logger.log(`Cliente destruído para ${userId}`);
+    } catch (e) {
+      this.logger.warn(`Erro destroy ${userId}`, e);
+    }
+    this.sessions.delete(userId);
+    // remove pasta de sessão
+    const sessionDir = path.join(process.cwd(), 'whatsapp-sessions', userId);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
   }
 
-  /**
-   * Retorna o status da conexão do cliente para o usuário.
-   */
-  async getConnectionStatus(userId: string): Promise<string> {
+  /** Status de conexão */
+  async getConnectionStatus(
+    userId: string,
+  ): Promise<'connected' | 'disconnected' | 'error'> {
     try {
-      const clientData = await this.getClientForUser(userId);
-      if (!clientData.client || !clientData.client.info) {
-        return 'disconnected';
-      }
-      return 'connected';
-    } catch (error) {
-      this.logger.error(
-        `Erro ao verificar status da conexão para ${userId}`,
-        error,
-      );
+      const { client } = await this.getClientForUser(userId);
+      return client.info ? 'connected' : 'disconnected';
+    } catch {
       return 'error';
     }
   }

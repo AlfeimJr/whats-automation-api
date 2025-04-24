@@ -9,6 +9,11 @@ import { AuthModule } from './auth/auth.module';
 import { LoginService } from './login/login.service';
 import { LoginModule } from './login/login.module';
 import { WhatsAppModule } from './whats/whats.module';
+import { ChatModule } from './chat/chat.module';
+import * as fs from 'fs';
+import * as path from 'path';
+import { FormsModule } from './form/form.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot(),
@@ -20,11 +25,19 @@ import { WhatsAppModule } from './whats/whats.module';
       password: process.env.DATABASE_PASSWORD || '',
       database: process.env.DATABASE || '',
       entities: [User],
+      ssl: {
+        ca: fs
+          .readFileSync(path.resolve(__dirname, 'ssl', 'us-east-2-bundle.pem'))
+          .toString(),
+        rejectUnauthorized: true, // exige que o certificado seja confiável
+      },
       synchronize: true,
     }),
     AuthModule,
     LoginModule,
     WhatsAppModule,
+    ChatModule,
+    FormsModule,
     TypeOrmModule.forFeature([User]),
   ],
 
