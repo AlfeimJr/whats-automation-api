@@ -13,6 +13,8 @@ import { ChatModule } from './chat/chat.module';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FormsModule } from './form/form.module';
+import { SubscriptionModule } from './subscription/subscription.module';
+import { PaymentModule } from './payment/payment.module';
 
 @Module({
   imports: [
@@ -38,6 +40,8 @@ import { FormsModule } from './form/form.module';
     WhatsAppModule,
     ChatModule,
     FormsModule,
+    SubscriptionModule,
+    PaymentModule,
     TypeOrmModule.forFeature([User]),
   ],
 

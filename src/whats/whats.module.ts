@@ -1,12 +1,12 @@
-// src/whatsapp/whatsapp.module.ts
 import { Module } from '@nestjs/common';
-
-import { WhatsAppController } from './whats.controller';
+import { WhatsController } from './whats.controller';
 import { WhatsappSessionManagerService } from './whatsapp.service';
+import { SubscriptionModule } from 'src/subscription/subscription.module';
 
 @Module({
+  imports: [SubscriptionModule],
+  controllers: [WhatsController],
   providers: [WhatsappSessionManagerService],
-  controllers: [WhatsAppController],
-  exports: [WhatsappSessionManagerService], // Caso queira usar o serviço em outros módulos
+  exports: [WhatsappSessionManagerService],
 })
 export class WhatsAppModule {}
